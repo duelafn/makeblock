@@ -1,0 +1,349 @@
+#!/usr/bin/perl -w
+# Copyright (C) 2015  Dean Serenevy
+# This work is licensed under a Creative Commons Attribution 3.0 Unported License (CC-BY-3.0).
+use strict; use warnings; use 5.014;
+
+use Getopt::Long qw/:config bundling/;
+use Hash::Util qw/ lock_keys /;
+our $VERSION = '1.0.0';# Created: 2015-09-27
+
+our %OPT = (
+    baud_rate => 115200,
+    poll      => 0.100,
+);
+our @OPT_SPEC =
+qw/ help|h version noact|no-act|dry-run DEBUG
+    baud_rate|baud=i device|d=s
+    continue!
+  /;
+sub USAGE { <<"__USAGE__" };
+usage: $_[0] [options] ACTION ARG(S)
+
+OPTIONS
+
+ --device <dev>        device to connect to, autodetected by default
+ --baud <rate>         baud rate ($OPT{baud_rate})
+ --poll <sec>          poll interval in seconds ($OPT{poll})
+
+
+ACTIONS
+
+  $_[0] run   SCRIPT
+
+       --continue      if set, continue with program even if errors encountered
+
+    Run the given G code script. By default, exits on the first error
+    unless --continue option is passed.
+
+  $_[0] exec  COMMAND
+
+    Execute the given G code line.
+
+__USAGE__
+
+use Path::Class;
+use Dean::Util qw/ clprint /;
+
+use File::Glob 'bsd_glob';
+use Device::SerialPort;
+
+package Response {
+    use Moose;
+    use MooseX::StrictConstructor;
+    use Method::Signatures::Simple;
+    use re 'taint'; use 5.014;
+
+    has ok => (
+        is         => 'rw',
+        isa        => 'Bool',
+        # perldoc Moose::Meta::Attribute::Native::Trait::Bool
+        traits     => ['Bool'],
+        predicate  => 'is_complete',
+        handles    => {
+            set_ok    => 'set',
+            set_error => 'unset',
+            error     => 'not',
+        },
+    );
+
+    # Response code: "ok" or "start"
+    has rc => (
+        is         => 'rw',
+        isa        => 'Str',
+    );
+
+    # Messages Received: "huh? G99"
+    has _messages => (
+        is         => 'ro',
+        isa        => 'ArrayRef',
+        # perldoc Moose::Meta::Attribute::Native::Trait::Array
+        traits     => ['Array'],
+        default    => sub { [] },
+        handles    => {
+            messages     => 'elements',
+            add_message  => 'push',
+        },
+    );
+
+    no Moose;
+    __PACKAGE__->meta->make_immutable;
+    1;
+}
+
+
+package Controller {
+    use Moose;
+    use MooseX::StrictConstructor;
+    use Method::Signatures::Simple;
+    use re 'taint'; use 5.014;
+    use Time::HiRes qw/ sleep /;
+
+    has baud_rate => (
+        is         => 'rw',
+        isa        => 'Int',
+        default    => 115200,
+    );
+
+    has eol => (
+        is         => 'rw',
+        isa        => 'Str',
+        default    => "\n",
+    );
+
+    has device => (
+        is         => 'rw',
+        isa        => 'Str',
+    );
+
+    has port => (
+        is         => 'rw',
+        isa        => 'Device::SerialPort',
+        lazy_build => 1,
+        clearer    => 'disconnect',
+    );
+
+    method _build_port() {
+        my $port = Device::SerialPort->new($self->device);
+        $port->baudrate($self->baud_rate);
+        $port->databits(8);
+        $port->parity("none");
+        $port->stopbits(1);
+        return $port;
+    }
+
+    # $ctrl->connect();
+    # $ctrl->connect($device);
+    # $ctrl->connect($device, $baud);
+    # $ctrl->connect($device, $baud, $eol);
+    # my $ctrl = Controller->connect($device);
+    # my $ctrl = Controller->connect($device, $baud);
+    # my $ctrl = Controller->connect($device, $baud, $eol);
+    sub connect {
+        my $self = shift;
+        $self = $self->new() unless ref($self);
+        $self->disconnect;
+        $self->device(shift)     if @_;
+        $self->baud_rate(shift)  if @_;
+        $self->eol(shift)        if @_;
+
+        my $port = $self->port;
+        $port->write(".");
+        my $rv;
+        my $timeout = time + 5;
+        my $saw_data = 0;
+        while (!length($rv = $port->lookfor) || $rv !~ /^(?:start|ok)/) {
+            $saw_data = 1 if $rv;
+            say $rv if $rv;
+            if (time > $timeout) {
+                if ($saw_data) {
+                    # Perhaps have wrong search string?
+                    last;
+                } else {
+                    die "Error connecting to controller\n";
+                }
+            }
+            sleep $OPT{poll};
+        }
+
+        return $self;
+    }
+
+    # $res = $conn->send($command);
+    # @res = $conn->send($commands);
+    # @res = $conn->send(@commands);
+    method send(@cmds) {
+        @cmds = grep length($_), map { split /\R/, $_ } @cmds;
+        my $port = $self->port;
+        my $eol  = $self->eol;
+
+        $port->are_match($eol);
+        $port->lookclear;
+
+        my @res;
+        for my $cmd (@cmds) {
+            my $sent = $port->write("$cmd$eol") - length($eol);
+            if (!$sent) {
+                return;
+            } else {
+                push @res, $self->get_response;
+                if ($sent != length($cmd)) {
+                    $res[-1]->set_error;
+                    $res[-1]->add_message("Send error, sent $sent chars of '$cmd'");
+                }
+            }
+            last unless $res[-1]->ok;
+        }
+        return wantarray ? @res : $res[-1];
+    }
+
+    method get_response() {
+        my $port = $self->port;
+        my $res  = Response->new();
+
+        my ($done, $rv);
+        until ($done) {
+            while (!length($rv = $port->lookfor)) {
+                sleep $OPT{poll};
+            }
+            if ($rv =~ /^(?:ok|start)/) {
+                $res->rc($rv);
+                $res->set_ok unless $res->is_complete;
+                $done = 1;
+            }
+            elsif ($rv =~ /^huh/i) {
+                $res->add_message($rv);
+                $res->set_error;
+            }
+            else {
+                # Querying parameters, debugging, etc.
+                $res->add_message($rv);
+            }
+        }
+        return $res;
+    }
+
+    no Moose;
+    __PACKAGE__->meta->make_immutable;
+    1;
+}
+
+sub get_controller {
+    ensure_device();
+    return Controller->connect($OPT{device}, $OPT{baud_rate});
+}
+
+
+
+our %ACTIONS; sub action;
+action help => sub { usage() };
+
+action exec => sub {
+    my ($action, @command) = @_;
+    usage(1) unless @command;
+    my $ctrl  = get_controller();
+    my $res = $ctrl->send("@command");
+    say for $res->messages, $res->rc;
+};
+
+action run => sub {
+    my ($action, $file) = @_;
+    usage(1) unless $file;
+    my $ctrl  = get_controller();
+    my @lines = slurp($file);# auto-chomp
+
+    my $i = 0;
+    my $err = 0;
+    for my $cmd (@lines) {
+        $i++;
+        next if !length($cmd) or $cmd =~ /^\s*[#\/\(]/;
+        clprint \*STDERR, "$i. $cmd";
+        my $res = $ctrl->send($cmd);
+        clprint \*STDERR, "$i. $cmd: $_\n" for $res->messages;
+        if ($res->ok) {
+            clprint \*STDERR, "$i. $cmd: OK";
+        } else {
+            clprint \*STDERR, "$i. $cmd: ERROR\n";
+            $err++;
+            last unless $OPT{continue};
+        }
+    }
+    if ($err) {
+        clprint \*STDERR, (1 == $err) ? "There was $err error\n" : "There were $err errors\n";
+    } else {
+        clprint \*STDERR, "Program transmitted successfully\n";
+    }
+};
+
+
+get_options( \%OPT, @OPT_SPEC );
+call_action( @ARGV );
+
+
+sub ensure_device {
+    return $OPT{device} if $OPT{device} and -r $OPT{device};
+    my @dev = list_devices();
+    if (1 == @dev and -r $dev[0]) {
+        return $OPT{device} = $dev[0];
+    }
+    elsif (@dev > 1) {
+        say STDERR "Multiple devices available, choose one and pass as --device argument:";
+        say STDERR "    $_" for @dev;
+        exit 1;
+    }
+    elsif (!@dev) {
+        say STDERR "No devices available, plug in Arduino and try again.";
+        exit 1;
+    }
+    else {
+        say STDERR "Error accessing device, permission denied.";
+        exit 1;
+    }
+}
+
+sub list_devices {
+    return (bsd_glob("/dev/ttyUSB*"), bsd_glob("/dev/ttyACM*"));
+}
+
+sub slurp {
+    my $file  = shift;
+    open my $FH, "<", $file or die "Error reading $file: $!";
+    local $/;
+    return split /\R/, scalar <$FH>;
+}
+
+sub action {
+    my $name = shift;
+    $name = [ $name ] unless ref($name);
+    unshift @_, "-action" if 1 == @_;
+    my %a = @_;
+    $a{-name} //= $$name[0];
+
+    $ACTIONS{$_} = \%a for @$name;
+}
+
+sub call_action {
+    my $name = shift // "";
+    usage("No such action $name") unless exists $ACTIONS{$name};
+    my $action = $ACTIONS{$name};
+
+    my @arg = @_;
+    @arg = $$action{-build_args}->( $action, @_ ) if $$action{-build_args};
+
+    $$action{-action}->( $action, @arg );
+}
+
+sub get_options {
+    my $OPT = shift;
+    GetOptions $OPT, @_ or usage(1);
+    usage() if $$OPT{help} || $$OPT{version};
+    lock_keys(%$OPT, keys %$OPT, map /^(\w+)/, @_);
+}
+
+sub usage {
+    my $status = (@_ && $_[0] =~ /^\d+$/) ? shift(@_) : 0+@_;
+    print @_, "\n" if @_;
+    require File::Spec; my $exe = (File::Spec->splitpath($0))[2];
+    $OPT{$_} = $OPT{$_} ? "enabled" : "disabled" for map /^(\w+).*!/, @OPT_SPEC;
+    print $OPT{version} ? "$exe version $VERSION\n" : USAGE($exe);
+    exit $status;
+}
