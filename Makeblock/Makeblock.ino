@@ -4,15 +4,13 @@
 // define the parameters of our machine.
 float X_STEPS_PER_INCH = 8917.94;
 float X_STEPS_PER_MM   = 351.1;
-int   X_MOTOR_STEPS    = 100;
+float X_STEPS_PER_CM   = 3511;
 
 float Y_STEPS_PER_INCH = 8903.208;
 float Y_STEPS_PER_MM   = 350.52;
-int   Y_MOTOR_STEPS    = 100;
+float Y_STEPS_PER_CM   = 3505.2;
 
-float Z_STEPS_PER_INCH = 48;
-float Z_STEPS_PER_MM   = 40;
-int   Z_MOTOR_STEPS    = 100;
+float Z_STEPS_PER_DEG  = 48;
 
 //our maximum feedrates
 long FAST_XY_FEEDRATE  = 2000;
@@ -21,6 +19,7 @@ long FAST_Z_FEEDRATE   = 2000;
 // Units in curve section
 #define CURVE_SECTION_INCHES 0.0019685
 #define CURVE_SECTION_MM 0.05
+#define CURVE_SECTION_CM 0.005
 
 // Set to one if sensor outputs inverting (ie: 1 means open, 0 means closed)
 // RepRap opto endstops are *not* inverting.

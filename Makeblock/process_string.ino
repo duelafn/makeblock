@@ -24,7 +24,7 @@ boolean abs_mode = false;   //0 = incremental; 1 = absolute
 //default to inches for units
 float x_units = X_STEPS_PER_MM;
 float y_units = Y_STEPS_PER_MM;
-float z_units = Z_STEPS_PER_MM;
+float z_units = Z_STEPS_PER_DEG;
 float curve_section = CURVE_SECTION_MM;
 
 //our direction vars
@@ -219,7 +219,7 @@ void process_string(char instruction[], int size)
             case 20:
                 x_units = X_STEPS_PER_INCH;
                 y_units = Y_STEPS_PER_INCH;
-                z_units = Z_STEPS_PER_INCH;
+                z_units = Z_STEPS_PER_DEG;
                 curve_section = CURVE_SECTION_INCHES;
 
                 calculate_deltas();
@@ -229,8 +229,18 @@ void process_string(char instruction[], int size)
             case 21:
                 x_units = X_STEPS_PER_MM;
                 y_units = Y_STEPS_PER_MM;
-                z_units = Z_STEPS_PER_MM;
+                z_units = Z_STEPS_PER_DEG;
                 curve_section = CURVE_SECTION_MM;
+
+                calculate_deltas();
+            break;
+
+            //cm for Units, NONSTANDARD!
+            case 22:
+                x_units = X_STEPS_PER_CM;
+                y_units = Y_STEPS_PER_CM;
+                z_units = Z_STEPS_PER_DEG;
+                curve_section = CURVE_SECTION_CM;
 
                 calculate_deltas();
             break;
@@ -415,8 +425,8 @@ void process_string(char instruction[], int size)
                 y_units = Y_STEPS_PER_MM;
             }
             if (has_command('Z', instruction, size)){
-        Z_STEPS_PER_MM = search_string('Z', instruction, size);
-                z_units = Z_STEPS_PER_MM;
+        Z_STEPS_PER_DEG = search_string('Z', instruction, size);
+                z_units = Z_STEPS_PER_DEG;
             }
             break;
             case 7:
