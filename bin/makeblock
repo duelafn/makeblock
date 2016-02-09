@@ -5,18 +5,22 @@ use strict; use warnings; use 5.014;
 
 use Getopt::Long qw/:config bundling/;
 use Hash::Util qw/ lock_keys /;
-our $VERSION = '1.0.0';# Created: 2015-09-27
+our $VERSION = '1.4.0';# Created: 2015-09-27
 
+my $DEFAULT_DPI = 100;
 our %OPT = (
     baud_rate => 115200,
     poll      => 0.100,
 );
 our @OPT_SPEC =
 qw/ help|h version noact|no-act|dry-run DEBUG
-    baud_rate|baud=i device|d=s
+    baud_rate|baud=i device|d=s dpi=i
     continue!
+    paper landscape center
   /;
-sub USAGE { <<"__USAGE__" };
+sub USAGE {
+    $OPT{dpi} ||= $DEFAULT_DPI;
+    <<"__USAGE__" };
 usage: $_[0] [options] ACTION ARG(S)
 
 OPTIONS
@@ -39,13 +43,121 @@ ACTIONS
 
     Execute the given G code line.
 
+  $_[0] render SCRIPT OUTPUT
+
+       --dpi           DPI when rendering to raster formats ($OPT{dpi})
+
+       --paper         Render as would be drawn on a sheet of paper
+       --landscape     If rendering on paper, swap width and height
+       --center        Place origin at center of paper
+
+    Render a script to an image file.
+
+  $_[0] draw SCRIPT
+
+    Draw an image on screen. Supports same options ad "draw".
 __USAGE__
 
 use Path::Class;
-use Dean::Util qw/ clprint /;
-
 use File::Glob 'bsd_glob';
 use Device::SerialPort;
+use Method::Signatures::Simple;
+
+package Util {
+    use 5.010; use strict; use warnings; use Carp;
+    use re 'taint';
+
+    my $EPS = 0.0001;
+    sub fpeq   { abs($_[0]-$_[1]) < $EPS }
+    sub fpzero { abs($_[0]) < $EPS       }
+
+
+#-----------------------------------------------------------------
+# BEGIN             Dean::Util code version 1.081
+#
+#  use Dean::Util qw/ clprint ymd hypot $pi $tau nicef /;
+
+#BEGIN: $_re_color_escape, 1 line
+our $_re_color_escape = '\e\[(?:\d+(?:;\d+)*)?m';
+#BEGIN: strip_color; depends: $_re_color_escape
+sub strip_color {
+  my (@x, $x);
+  @x = map { defined() ? do { $x = $_; $x =~ s/$_re_color_escape//g; $x } : undef } @_;
+  return wantarray ? @x : shift @x;
+}
+#END: strip_color
+
+#BEGIN: sum, 1 line
+sub sum { my $x=0; $x += $_ for @_; $x}
+#BEGIN: clength; depends: strip_color, sum
+sub clength {
+  if (wantarray) { return map((defined() ? length : 0), strip_color(@_) )  }
+  else           { return sum( map((defined() ? length : 0), strip_color(@_) ) ) }
+}
+#END: clength
+
+#BEGIN: untaint_int, 1 line
+sub untaint_int($) {no re 'taint'; return unless defined($_[0]) and $_[0] =~ /^([-+]?[0-9]+)$/; return 0 + $1 }
+#BEGIN: clprint, depends: clength
+{ my $var = "";
+  $_Util::clprint::out = \*STDERR;
+  sub clprint {
+    local $_Util::clprint::out = (@_ and ref($_[0]) =~ /^(?:GLOB|IO::)/) ? shift() : $_Util::clprint::out;
+    my $previous = (@_ and ref($_[0]) eq 'SCALAR') ? shift() : \$var;
+    my $i;
+    if (@_) {
+      print $_Util::clprint::out "\b \b" x clength($$previous);
+      $$previous = (defined $,) ? join($, , @_) : join("" , @_);
+      print $_Util::clprint::out $$previous;
+      $$previous .= $\ if defined $\;
+      $$previous = substr $$previous, $i+1 if defined ($i = rindex($$previous, "\n")) and $i >= 0;
+    } else {
+      $$previous = "";
+    }
+  }
+}
+#END: clprint
+
+#BEGIN: ymd
+sub ymd {
+  my ($Y,$m,$d) = @_ ? (localtime($_[0]))[5,4,3] : (localtime)[5,4,3];
+  $Y+=1900; $m++;
+  $m = sprintf("%02i",$m);
+  $d = sprintf("%02i",$d);
+  return wantarray ? ($Y,$m,$d) : "$Y-$m-$d";
+}
+#END: ymd
+
+#BEGIN: hypot
+sub hypot {
+    # Without overflow https://en.wikipedia.org/wiki/Hypot
+    my ($x, $y) = (abs($_[0]), abs($_[1]));
+    ($x, $y) = ($y, $x) if $x > $y;
+    return $y if $x < 0.00000095367431640625;# epsilon
+    my $t = $x / $y;
+    return $y * sqrt(1 + $t*$t)
+}
+#END: hypot
+
+#BEGIN: $pi, 1 line
+our $pi  = "3.141592653589793238462643383280";
+#BEGIN: $tau, 1 line
+our $tau = "6.283185307179586476925286766559";
+#BEGIN: nicef, depends: untaint_int
+sub nicef {
+  my ($n, $d) = @_;
+  $d = 2 unless defined $d;
+  $d = untaint_int($d);
+  local $_ = sprintf("%.${d}f", $n);
+  s/0+$// if /\./; s/\.$//;
+  return $_;
+}
+#END: nicef
+
+#
+# END               Dean::Util code version 1.081
+#-----------------------------------------------------------------
+}
 
 package Response {
     use Moose;
@@ -227,6 +339,443 @@ package Controller {
     1;
 }
 
+package GCode {
+    use Moose;
+    use MooseX::StrictConstructor;
+    use Method::Signatures::Simple;
+    use re 'taint'; use 5.014;
+    use Scalar::Util qw/ looks_like_number /;
+
+    has [qw/ type num orig /] => (
+        is         => 'rw',
+        isa        => 'Str',
+    );
+
+    method code($code) {
+        if (@_ and $code) {
+            my (undef, $type, $num) = split /([a-zA-Z]+)/, $code =~ s/\s+//gr;
+            if (length($type) and length($num) and looks_like_number($num)) {
+                $self->type($type);
+                $self->num($num);
+            } else {
+                die "Can't parse code '$code'";
+            }
+        }
+        $self->type . $self->num
+    }
+
+    has attributes => (
+        is         => 'ro',
+        isa        => 'HashRef',
+        # perldoc Moose::Meta::Attribute::Native::Trait::Hash
+        traits     => ['Hash'],
+        default    => sub { {} },
+        handles    => {
+            attr     => 'accessor',
+            attrs    => 'get',
+            has_attr => 'defined',
+        },
+    );
+
+    method defattr($attr, $dflt) {
+        $self->has_attr($attr) ? $self->attr($attr) : $dflt;
+    }
+
+    # Code is optional and is the last code seen (for continuations)
+    method parse($orig, $code) {
+        return unless defined($orig);
+        my $line = $orig =~ s/\([^\)]*\)//gr;             # strip paren-comments
+        return if !length($line) or $line =~ /^\s*[#\/]/; # Skip if full-line comment
+        $line =~ s/\s+//g;                                # spaces are for losers
+        my @codes = split /([a-zA-Z]+)/, $line;
+        my ($gc, @rv);
+
+        while (@codes) {
+            my $name = shift @codes;
+            next unless length $name;
+
+            if ($name eq 'G') {
+                die "Error parsing '$orig': Expected number after '$name'" unless @codes and looks_like_number($codes[0]);
+                push @codes, $gc if $gc;
+                $gc = $self->new(orig => $orig, type => $name, num => shift @codes);
+            }
+
+            elsif ($name =~ /^[XYZIJ]$/) {
+                unless ($gc) {
+                    $gc = $self->new(orig => $orig);
+                    die "Error parsing '$orig': Expected code type before '$name'" unless $code;
+                    $gc->code($code);
+                }
+                die "Error parsing '$orig': Expected number after '$name'" unless @codes and looks_like_number($codes[0]);
+                $gc->attr($name => shift(@codes));
+            }
+
+            else {
+                die "Error parsing '$orig': Unknown command '$name'";
+            }
+        }
+
+        push @codes, $gc if $gc;
+        return unless @codes;
+        return wantarray ? @codes : \@codes;
+    }
+}
+
+package PSDrawing {
+    use Moose;
+    use MooseX::StrictConstructor;
+    use Method::Signatures::Simple;
+    use re 'taint'; use 5.014;
+    use Scalar::Util qw/ looks_like_number /;
+    our $pi  = $Util::pi;
+    our $tau = $Util::tau;
+
+    has unit => (
+        is         => 'ro',
+        writer     => 'set_unit',
+        isa        => 'Num',
+        default    => 72,
+    );
+    # Keep $self->point() in the current units
+    before set_unit => method {
+        my $scale = 1/$self->unit;
+        $self->add_line("$scale $scale scale") if $self->has_lines;
+        $self->scale_current_point($scale)
+    };
+    after  set_unit => method {
+        my $scale = $self->unit;
+        $self->add_line("$scale $scale scale") if $self->has_lines;
+        $self->scale_current_point(1/$scale)
+    };
+
+
+    has lines => (
+        reader     => '_lines',
+        isa        => 'ArrayRef',
+        lazy_build => 1,
+        predicate  => 'has_lines',
+    );
+    method _build_lines {
+        my $scale = $self->unit;
+        return [ "$scale $scale scale" ]
+    }
+
+    method code()     { join "\n", @{$self->_lines} }
+    method add_line($line, @rest) {
+        $line = sprintf $line, @rest if @rest;
+        push @{$self->_lines}, $line;
+    }
+
+    has bbox => (
+        reader     => '_bbox',
+        isa        => 'ArrayRef',
+        default    => sub { [0, 0, 0, 0] },# xmin ymin xmax ymax
+    );
+
+    has grow_bbox => (
+        is         => 'rw',
+        isa        => 'Bool',
+        default    => 1,
+    );
+
+    method bbox() { return wantarray ? @{$self->_bbox} : "@{$self->_bbox}" }
+    method extend_bbox($x, $y) {
+        return unless $self->grow_bbox;
+        my $bbox  = $self->_bbox;
+        $$bbox[0] = $x if $x < $$bbox[0];
+        $$bbox[1] = $y if $y < $$bbox[1];
+        $$bbox[2] = $x if $x > $$bbox[2];
+        $$bbox[3] = $y if $y > $$bbox[3];
+    }
+    method extend_bbox_current() {
+        return unless $self->grow_bbox;
+        my $bbox  = $self->_bbox;
+        my $pt    = $self->point;
+        my $scale = $self->unit;
+        $$bbox[0] = $scale * $$pt[0] if $scale * $$pt[0] < $$bbox[0];
+        $$bbox[1] = $scale * $$pt[1] if $scale * $$pt[1] < $$bbox[1];
+        $$bbox[2] = $scale * $$pt[0] if $scale * $$pt[0] > $$bbox[2];
+        $$bbox[3] = $scale * $$pt[1] if $scale * $$pt[1] > $$bbox[3];
+    }
+
+    has length_pt => (
+        is         => 'rw',
+        isa        => 'Num',
+        default    => 0,
+    );
+
+    method add_to_length($len) { $self->length_pt($self->unit() * $len + $self->length_pt) }
+    method length()            { $self->length_pt() / $self->unit() }
+
+    has point => (
+        is         => 'ro',
+        isa        => 'ArrayRef',
+        default    => sub { [0, 0] },
+    );
+    method set_point($x, $y)       { @{$self->point} = ($x, $y) }
+    method add_to_point($dx, $dy)  { my $pt = $self->point; $$pt[0] += $dx; $$pt[1] += $dy; }
+    method scale_current_point($m) { my $pt = $self->point; $$pt[0] *= $m;  $$pt[1] *= $m; }
+    method X() { $self->point->[0] }
+    method Y() { $self->point->[1] }
+
+    # Drawing
+    #--------
+    method stroke($extra) {
+        $extra //= "";
+        my $unit = 1/$self->unit;
+        $self->add_line("gsave $unit $unit scale $extra stroke grestore");
+    }
+
+    method moveto($x, $y) {
+        $self->add_line("$x $y moveto");
+        $self->add_to_length(Util::hypot($x - $self->X, $y - $self->Y));
+        $self->set_point($x, $y);
+    }
+
+    method rmoveto($x, $y) {
+        $self->add_line("$x $y rmoveto");
+        $self->add_to_length(Util::hypot($x, $y));
+        $self->add_to_point($x, $y);
+    }
+
+    method lineto($x, $y) {
+        $self->extend_bbox_current;
+        $self->add_line("$x $y lineto");
+        $self->add_to_length(Util::hypot($x - $self->X, $y - $self->Y));
+        $self->set_point($x, $y);
+        $self->extend_bbox_current;
+    }
+
+    method rlineto($x, $y) {
+        $self->extend_bbox_current;
+        $self->add_line("$x $y rlineto");
+        $self->add_to_length(Util::hypot($x, $y));
+        $self->add_to_point($x, $y);
+        $self->extend_bbox_current;
+    }
+
+    # Draw arc centered at ($Cx, $Cy) with radius $r from $ang1 to $ang2
+    # The `arc` command goes counterclockwise, `arcn` goes clockwise
+    method arc($Cx, $Cy, $r, $ang1, $ang2)  { $self->_arc("arc",  @_); }
+    method arcn($Cx, $Cy, $r, $ang1, $ang2) { $self->_arc("arcn", @_); }
+
+    method _arc($cmd, $Cx, $Cy, $r, $ang1, $ang2) {
+        my $scale = $self->unit;
+        my $t1 = $pi * $ang1/180;
+        my $t2 = $pi * $ang2/180;
+
+        # Postscript will do a move to the start angle if it is not our
+        # current point. Therefore, make sure the bbox is extended to there.
+        $self->extend_bbox($scale*($Cx+$r*cos($t1)), $scale*($Cx+$r*sin($t1)));
+
+        $self->add_line("$Cx $Cy $r $ang1 $ang2 $cmd");
+        $self->set_point($Cx+$r*cos($t2), $Cy+$r*sin($t2));
+        $self->extend_bbox_current;
+
+        # Shift $t1 to be between 0 and $tau (inclusive) so we can
+        # determine whether arc crosses a coordinate axis. Preserve
+        # relative angle to $t2 so arc length is computed correctly in case
+        # of wrap-around.
+        while ($t1 < 0)    { $t1 += $tau; $t2 += $tau }
+        while ($t1 > $tau) { $t1 -= $tau; $t2 -= $tau }
+
+        my ($tlow, $thigh);
+        if ($cmd eq 'arc') {
+            $t2 += $tau while $t2 < $t1;# Impossible arc, transform to first possible
+            ($tlow, $thigh) = ($t1, $t2);
+        } else {
+            $t2 -= $tau while $t2 > $t1;# Impossible arc, transform to first possible
+            ($tlow, $thigh) = ($t2, $t1);
+        }
+
+        $self->add_to_length($r * ($thigh - $tlow));
+
+        $self->extend_bbox($scale*$Cx, $scale*($Cy+$r)) if $tlow < $pi/2   and $thigh > $pi/2;
+        $self->extend_bbox($scale*($Cx-$r), $scale*$Cy) if $tlow < $pi     and $thigh > $pi;
+        $self->extend_bbox($scale*$Cx, $scale*($Cy-$r)) if $tlow < 3*$pi/2 and $thigh > 3*$pi/2;
+        $self->extend_bbox($scale*($Cx+$r), $scale*$Cy) if $tlow < $tau    and $thigh > $tau;
+        $self->extend_bbox($scale*($Cx+$r), $scale*$Cy) if $tlow < 0       and $thigh > 0;
+    }
+
+    method document() {
+        return join "\n",
+        '%!PS-Adobe-2.0 EPSF-2.0',
+        '%%CreationDate: ' . Util::ymd(),
+        '%%LanguageLevel: 2',
+        '%%BoundingBox: '.join(' ', $self->bbox),
+        "\n",
+        $self->code,
+        "showpage",
+        "";
+    }
+}
+
+func translate($file, $translator) {
+    my $obj = $translator->();
+    open my $F, "<", $file or die "Error reading $file: $!";
+    my $last_code;
+    while (defined(my $line = <$F>)) {
+        chomp($line);
+        for (GCode->parse($line, $last_code)) {
+            $translator->($obj, $last_code = $_);
+        }
+    }
+    return $translator->($obj);
+}
+
+func lint_check($err, $code) {
+    return []    unless defined($err);  # initialize
+    return @$err unless defined($code); # finalize
+
+    # Just basic GCode validation for now
+    return 1;
+}
+
+func render_ps($ps, $code) {
+    unless (defined($ps)) {   # initialize
+        my %ps_opt;
+        if ($OPT{paper}) {
+            $ps_opt{grow_bbox} = 0;
+            $ps_opt{bbox} = [ 0, 0, 612, 793 ];# xmin ymin xmax ymax
+            if ($OPT{landscape}) {
+                @{$ps_opt{bbox}}[1,0,3,2] = @{$ps_opt{bbox}};
+            }
+            if ($OPT{center}) {
+                my $dx = ($ps_opt{bbox}[2] - $ps_opt{bbox}[0])/2;
+                $ps_opt{bbox}[$_] -= $dx for 0, 2;
+                my $dy = ($ps_opt{bbox}[3] - $ps_opt{bbox}[1])/2;
+                $ps_opt{bbox}[$_] -= $dy for 1, 3;
+            }
+        }
+        return {
+            runtime  => 0,
+            absolute => 1,
+            need_stroke => 0,
+            ps => PSDrawing->new(%ps_opt),
+        };
+    }
+    unless (defined($code)) { # finalize
+        $$ps{ps}->stroke if $$ps{need_stroke};
+        return $$ps{ps}->document();
+    }
+
+    # Codes: 0-4, 20, 21, 28, 30, 90, 91, 92
+    if ('G' eq $code->type) {
+        for ($code->num) {
+            if (/^[01]$/) {# G0, G1: line
+                $$ps{ps}->moveto(0,0) unless $$ps{ps}->has_lines;
+                if ($code->has_attr("Z")) {
+                    if ($code->attr("Z") > 45) {
+                        $$ps{pen_down} = 1;
+                    } else {
+                        $$ps{pen_down} = 0;
+                        $$ps{ps}->stroke;
+                        $$ps{need_stroke} = 0;
+                    }
+                }
+                my $lineto;
+                if ($$ps{pen_down}) {
+                    $lineto = $$ps{absolute} ? "lineto" : "rlineto";
+                } else {
+                    $lineto = $$ps{absolute} ? "moveto" : "rmoveto";
+                }
+                if ($code->has_attr("X") or $code->has_attr("Y")) {
+                    $$ps{need_stroke} = 1;
+                    my $x = $code->has_attr("X") ? $code->attr("X") : $$ps{ps}->X;
+                    my $y = $code->has_attr("Y") ? $code->attr("Y") : $$ps{ps}->Y;
+                    $$ps{ps}->$lineto($x, $y);
+                }
+            }
+
+            elsif (/^[23]$/) {# G2 (CW), G3 (CCW): arc
+                $$ps{ps}->moveto(0,0) unless $$ps{ps}->has_lines;
+
+                my $X0 = $$ps{ps}->X;
+                my $Y0 = $$ps{ps}->Y;
+
+                my ($X1, $Y1);
+                if ($$ps{absolute}) {
+                    $X1 = $code->defattr("X", $X0);
+                    $Y1 = $code->defattr("Y", $Y0);
+                } else {
+                    $X1 = $code->defattr("X", 0) + $X0;
+                    $Y1 = $code->defattr("Y", 0) + $Y0;
+                }
+
+                my $Cx = $code->defattr("I", 0) + $X0;
+                my $Cy = $code->defattr("J", 0) + $Y0;
+
+                my ($aX, $aY) = ($X0-$Cx, $Y0-$Cy);
+                my ($bX, $bY) = ($X1-$Cx, $Y1-$Cy);
+
+                # Note: Computations should be based on aX, aY, angleA, and
+                # angleB since that is what the arduino does (it doesn't
+                # care what X1 and Y2 are).
+                #
+                my ($angleA, $angleB) = (atan2($aY, $aX), atan2($bY, $bX));
+
+                $_ *= 180 / $Util::pi for $angleA, $angleB;
+
+                # Handle full-circle case:
+                $angleB += 360 if $angleB eq $angleA;
+
+                my $radius = Util::hypot($aX, $aY);
+                my $arc = (2 == $code->num) ? "arcn" : "arc";
+
+                if ($$ps{pen_down}) {
+                    $$ps{need_stroke} = 1;
+                    $$ps{ps}->$arc($Cx, $Cy, $radius, $angleA, $angleB);
+                } else {
+                    $$ps{ps}->moveto($X1, $Y1);
+                }
+
+                unless (Util::fpeq($$ps{ps}->X, $X1) and Util::fpeq($$ps{ps}->Y, $Y1)) {
+                    printf STDERR "WARNING: '%s' will end at (%s, %s) not (%s, %s) as specified.\n",
+                        $code->orig,
+                        Util::nicef($$ps{ps}->X), Util::nicef($$ps{ps}->Y),
+                        Util::nicef($X1), Util::nicef($Y1),
+                    ;
+                }
+            }
+
+            elsif (/^4$/) {# G4: Dwell
+                $$ps{runtime} += $code->attr("P") || 0;
+            }
+
+            elsif (/^20$/) {# G20: inches
+                $$ps{ps}->set_unit(72);
+            }
+            elsif (/^21$/) {# G21: mm
+                $$ps{ps}->set_unit(2.8346457);
+            }
+            elsif (/^22$/) {# G22: cm
+                $$ps{ps}->set_unit(28.346457);
+            }
+
+            elsif (/^28$/) {# G28: Home machine ("Go to Predefined Position")
+                die "Not implemented: " . $code->orig
+            }
+            elsif (/^30$/) {# G30: ??? (Go to Predefined Position)
+                die "Not implemented: " . $code->orig
+            }
+
+            elsif (/^90$/) {# G90: absolute distance mode
+                $$ps{absolute} = 1;
+            }
+            elsif (/^91$/) {# G91: incremental distance mode
+                $$ps{absolute} = 0;
+            }
+
+            elsif (/^92$/) {# G92: Coordinate System Offset
+                die "Not implemented: " . $code->orig
+            }
+        }
+    }
+
+    else { die "Not implemented: " . $code->orig }
+}
+
+
 sub get_controller {
     ensure_device();
     return Controller->connect($OPT{device}, $OPT{baud_rate});
@@ -256,28 +805,70 @@ action run => sub {
     for my $cmd (@lines) {
         $i++;
         next if !length($cmd) or $cmd =~ /^\s*[#\/\(]/;
-        clprint \*STDERR, "$i. $cmd";
+        Util::clprint \*STDERR, "$i. $cmd";
         my $res = $ctrl->send($cmd);
-        clprint \*STDERR, "$i. $cmd: $_\n" for $res->messages;
+        Util::clprint \*STDERR, "$i. $cmd: $_\n" for $res->messages;
         if ($res->ok) {
-            clprint \*STDERR, "$i. $cmd: OK";
+            Util::clprint \*STDERR, "$i. $cmd: OK";
         } else {
-            clprint \*STDERR, "$i. $cmd: ERROR\n";
+            Util::clprint \*STDERR, "$i. $cmd: ERROR\n";
             $err++;
             last unless $OPT{continue};
         }
     }
     if ($err) {
-        clprint \*STDERR, (1 == $err) ? "There was $err error\n" : "There were $err errors\n";
+        Util::clprint \*STDERR, (1 == $err) ? "There was $err error\n" : "There were $err errors\n";
     } else {
-        clprint \*STDERR, "Program transmitted successfully\n";
+        Util::clprint \*STDERR, "Program transmitted successfully\n";
     }
 };
 
+action render => sub {
+    my ($action, $file, $output) = @_;
+    my $doc = translate($file, \&render_ps);
+
+    if (!defined($output) or $output eq '-') {
+        print $doc;
+    }
+
+    elsif ($output =~ /\.e?ps$/) {
+        open my $F, ">", $output or die "Error writing to $output: $!";
+        print $F $doc;
+    }
+
+    else {
+        my $tmp = File::Temp->new(SUFFIX => '.eps');
+        print $tmp $doc;
+        $tmp->close;
+        convert($tmp->filename, $output);
+    }
+};
+
+action draw => sub {
+    my ($action, $file) = @_;
+    unless ($OPT{dpi}) {
+        $OPT{dpi} = $DEFAULT_DPI;
+        $OPT{dpi} = $1 if `xdpyinfo -display '$ENV{DISPLAY}'` =~ /(\d+x\d+) dots per inch/;
+    }
+
+    my $ps  = File::Temp->new(SUFFIX => '.eps');
+    my $png = File::Temp->new(SUFFIX => '.png');
+
+    print $ps translate($file, \&render_ps);
+    $ps->close;
+    convert($ps->filename, $png->filename);
+    system display => $png->filename;
+};
 
 get_options( \%OPT, @OPT_SPEC );
 call_action( @ARGV );
 
+sub convert {
+    my ($from, $to) = @_;
+    my @opts = qw/ -background white  -flatten /;
+    push @opts, "-trim" unless $OPT{paper};
+    system convert => -density => ($OPT{dpi} || $DEFAULT_DPI), $from, @opts, $to;
+}
 
 sub ensure_device {
     return $OPT{device} if $OPT{device} and -r $OPT{device};
