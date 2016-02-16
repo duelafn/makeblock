@@ -1,6 +1,6 @@
 
-Arduinao GCode Parser and Command-Line Tool
-===========================================
+Arduino GCode Parser and Command-Line Tool
+==========================================
 
 Unofficial fork of the Makeblock arduino gcode interpreter ready to run on
 the msot excellent Makeblock
