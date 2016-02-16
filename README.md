@@ -9,8 +9,7 @@ the msot excellent Makeblock
 Additionally includes a command-line tool which can send your gcode files
 to the plotter without using the Arduino serial connection, and can render
 your gcode files to PostScript or other image format (using the `convert`
-utility from ImageMagick - `apt-get install imagemagick` on Debian-based
-systems).
+utility from ImageMagick).
 
 
 This repository splits the arduino files from the full
@@ -61,3 +60,10 @@ Render a script to an image file.
     makeblock draw SCRIPT
 
 Draw an image on screen.
+
+
+### Dependencies
+
+On a debian-based system, you can install the script dependencies using:
+
+    sudo apt-get install arduino imagemagick libdevice-serialport-perl libmethod-signatures-simple-perl libmoose-perl libmoosex-strictconstructor-perl libpath-class-perl
