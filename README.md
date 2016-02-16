@@ -20,3 +20,19 @@ arduino `.ino` files is a bit unclear (but at least must be compatible with
 the LGPL of the arduino Servo library), there is a
 [bug report](https://github.com/Makeblock-official/XY-Plotter-2.0/issues/13)
 asking for upstream license clarification.
+
+
+GCode
+-----
+
+This controller supports codes: 0-4, 20, 21, 28, 30, 90, 91, 92.
+
+See http://linuxcnc.org/docs/html/gcode.html for a good GCode reference,
+though this controller will never support most of the codes documented
+there.
+
+Additionally, this interpreter supports the non-standard G22 to set units to cm.
+
+For PEN UP use: G1 Z0
+
+For PEN DOWN use: G1 Z90
