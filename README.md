@@ -3,7 +3,7 @@ Arduino GCode Parser and Command-Line Tool
 ==========================================
 
 Unofficial fork of the Makeblock arduino gcode interpreter ready to run on
-the msot excellent Makeblock
+the most excellent Makeblock
 [XY-Plotter](http://www.makeblock.cc/xy-plotter-robot-kit/).
 
 Additionally includes a command-line tool which can send your gcode files
