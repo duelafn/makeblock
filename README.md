@@ -36,3 +36,28 @@ Additionally, this interpreter supports the non-standard G22 to set units to cm.
 For PEN UP use: G1 Z0
 
 For PEN DOWN use: G1 Z90
+
+
+Command-line tool
+-----------------
+
+    makeblock --help
+
+Display usage information and available options.
+
+    makeblock run   SCRIPT
+
+Run the given G code script. By default, exits on the first error unless
+`--continue` option is passed.
+
+    makeblock exec  COMMAND
+
+Execute the given G code line.
+
+    makeblock render SCRIPT OUTPUT
+
+Render a script to an image file.
+
+    makeblock draw SCRIPT
+
+Draw an image on screen.
