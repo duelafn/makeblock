@@ -25,14 +25,6 @@ long FAST_Z_FEEDRATE   = 2000;
 // RepRap opto endstops are *not* inverting.
 int SENSORS_INVERTING = 1;
 
-// How many temperature samples to take.  each sample takes about 100 usecs.
-
-
-/****************************************************************************************
-* digital i/o pin assignment
-*
-* this uses the undocumented feature of Arduino - pins 14-19 correspond to analog 0-5
-****************************************************************************************/
 
 int X_STEP_PIN     = 10;
 int X_DIR_PIN      = 11;
