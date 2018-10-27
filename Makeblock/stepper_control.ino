@@ -75,7 +75,9 @@ void dda_move(long micro_delay)
 
     //figure out our deltas
     max_delta = max(delta_steps.x, delta_steps.y);
-    max_delta = max(delta_steps.z, max_delta);
+    if (!Z_ENABLE_SERVO) { // Skip Z-steps if Z is a servo
+        max_delta = max(delta_steps.z, max_delta);
+    }
 
     //init stuff.
     long x_counter = -max_delta/2;
@@ -97,7 +99,9 @@ void dda_move(long micro_delay)
     {
         x_can_step = can_step(X_MIN_PIN, X_MAX_PIN, current_steps.x, target_steps.x, x_direction);
         y_can_step = can_step(Y_MIN_PIN, Y_MAX_PIN, current_steps.y, target_steps.y, y_direction);
-        z_can_step = can_step(Z_MIN_PIN, Z_MAX_PIN, current_steps.z, target_steps.z, z_direction);
+        if (!Z_ENABLE_SERVO) { // Skip Z-steps if Z is a servo
+            z_can_step = can_step(Z_MIN_PIN, Z_MAX_PIN, current_steps.z, target_steps.z, z_direction);
+        }
 
         if (x_can_step)
         {
