@@ -489,6 +489,9 @@ package PSDrawing {
         default    => 1,
     );
 
+    method width()  { my ($x1, $x2) = (@{$self->_bbox})[0, 2]; return $x2-$x1; }
+    method height() { my ($y1, $y2) = (@{$self->_bbox})[1, 3]; return $y2-$y1; }
+
     method bbox() { return wantarray ? @{$self->_bbox} : "@{$self->_bbox}" }
     method extend_bbox($x, $y) {
         return unless $self->grow_bbox;
@@ -667,6 +670,7 @@ func render_ps($ps, $code) {
     }
     unless (defined($code)) { # finalize
         $$ps{ps}->stroke if $$ps{need_stroke};
+        die "Empty image. Did you forget to pen-down?\n" unless $$ps{ps}->width or $$ps{ps}->height;
         return $$ps{ps}->document();
     }
 
