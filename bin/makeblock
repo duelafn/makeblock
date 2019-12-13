@@ -14,6 +14,7 @@
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 use strict; use warnings; use 5.014;
 
+use Encode;
 use Getopt::Long qw/:config bundling/;
 use Hash::Util qw/ lock_keys /;
 our $VERSION = '1.4.0';# Created: 2015-09-27
@@ -626,10 +627,8 @@ package PSDrawing {
 
 func translate($file, $translator) {
     my $obj = $translator->();
-    open my $F, "<", $file or die "Error reading $file: $!";
     my $last_code;
-    while (defined(my $line = <$F>)) {
-        chomp($line);
+    for my $line (slurp($file)) {
         for (GCode->parse($line, $last_code)) {
             $translator->($obj, $last_code = $_);
         }
@@ -914,7 +913,15 @@ sub slurp {
     my $file  = shift;
     open my $FH, "<", $file or die "Error reading $file: $!";
     local $/;
-    return split /\R/, scalar <$FH>;
+    my $content = <$FH>;
+    if ($content =~ s/^\xEF\xBB\xBF//) {
+        1;
+    } elsif ($content =~ s/^\xFE\xFF//) {
+        $content = encode("UTF-8", decode("UTF-16BE", $content));
+    } elsif ($content =~ s/^\xFF\xFE//) {
+        $content = encode("UTF-8", decode("UTF-16LE", $content));
+    }
+    return split /\R/, $content;
 }
 
 sub action {
