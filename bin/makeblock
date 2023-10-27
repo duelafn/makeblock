@@ -76,8 +76,8 @@ use Device::SerialPort;
 use Method::Signatures::Simple;
 
 package Util {
-    use 5.010; use strict; use warnings; use Carp;
-    use re 'taint';
+    use strict; use warnings; use re 'taint';
+    use Carp;
 
     my $EPS = 0.0001;
     sub fpeq   { abs($_[0]-$_[1]) < $EPS }
@@ -172,10 +172,10 @@ sub nicef {
 }
 
 package Response {
+    use strict; use warnings; use re 'taint';
     use Moose;
     use MooseX::StrictConstructor;
     use Method::Signatures::Simple;
-    use re 'taint'; use 5.014;
 
     has ok => (
         is         => 'rw',
@@ -216,10 +216,10 @@ package Response {
 
 
 package Controller {
+    use strict; use warnings; use re 'taint';
     use Moose;
     use MooseX::StrictConstructor;
     use Method::Signatures::Simple;
-    use re 'taint'; use 5.014;
     use Time::HiRes qw/ sleep /;
 
     has baud_rate => (
@@ -352,10 +352,10 @@ package Controller {
 }
 
 package GCode {
+    use strict; use warnings; use re 'taint';
     use Moose;
     use MooseX::StrictConstructor;
     use Method::Signatures::Simple;
-    use re 'taint'; use 5.014;
     use Scalar::Util qw/ looks_like_number /;
 
     has [qw/ type num orig /] => (
@@ -434,10 +434,10 @@ package GCode {
 }
 
 package PSDrawing {
+    use strict; use warnings; use re 'taint';
     use Moose;
     use MooseX::StrictConstructor;
     use Method::Signatures::Simple;
-    use re 'taint'; use 5.014;
     use Scalar::Util qw/ looks_like_number /;
     our $pi  = $Util::pi;
     our $tau = $Util::tau;
